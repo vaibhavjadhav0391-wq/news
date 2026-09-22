@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables (contains API keys - NEVER commit this!)
+.env
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+Thumbs.db
+.DS_Store

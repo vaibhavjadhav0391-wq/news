@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: news-analyzer
+    env: python
+    region: singapore  # closest to India
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: NEWS_API_KEY
+        sync: false   # you will paste this in Render dashboard
+      - key: GEMINI_API_KEY
+        sync: false   # you will paste this in Render dashboard
+      - key: PYTHON_VERSION
+        value: 3.11.0

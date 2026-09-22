@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="AI-powered multi-source news comparison and analysis. Compare how different outlets report the same story — find agreements, differences, and contradictions instantly.">
+    <title>News Analyzer — AI Multi-Source News Comparison</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="app-container">
+
+    <!-- ── Hero Header ── -->
+    <header class="app-header">
+        <div class="app-logo-wrap">
+            <div class="app-logo-icon">🔍</div>
+            <span class="app-logo-text">Powered by Gemini AI</span>
+        </div>
+        <h1 class="app-title">News Analyzer</h1>
+        <div class="ai-badge">AI-POWERED ANALYSIS</div>
+        <p class="app-tagline">Compare before you believe.</p>
+        <p class="app-subtitle">
+            Fetches articles from multiple sources, removes duplicates, groups related
+            stories, and uses AI to surface agreements, differences &amp; contradictions.
+        </p>
+    </header>
+
+    <!-- ── Search ── -->
+    <section class="search-section">
+        <form class="search-form" id="search-form" method="POST" action="/">
+            <div class="search-input-wrapper">
+                <span class="search-icon">📰</span>
+                <input
+                    type="text"
+                    id="topic-input"
+                    name="topic"
+                    class="search-input"
+                    placeholder="Enter a news topic or claim to analyze..."
+                    value="{{ topic }}"
+                    autocomplete="off"
+                >
+            </div>
+            <button type="submit" id="analyze-btn" class="analyze-btn">
+                ✦ Analyze
+            </button>
+        </form>
+    </section>
+
+    <!-- ── Loading State ── -->
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-ring"></div>
+        <div class="loading-text">Analyzing multiple sources...</div>
+        <div class="loading-pipeline">
+            <span class="pipeline-step">📥 Fetching</span>
+            <span class="pipeline-arrow">›</span>
+            <span class="pipeline-step">🗑️ Deduplicating</span>
+            <span class="pipeline-arrow">›</span>
+            <span class="pipeline-step">🗂️ Grouping</span>
+            <span class="pipeline-arrow">›</span>
+            <span class="pipeline-step">⚖️ Comparing</span>
+            <span class="pipeline-arrow">›</span>
+            <span class="pipeline-step">🤖 AI Analysis</span>
+        </div>
+    </div>
+
+    <!-- ── Zero-Relevant / Error State ── -->
+    {% if result and result.failed_stage == 'relevance_filter' %}
+    <div class="zero-relevant-box" id="zero-relevant-state">
+        <div class="zero-relevant-header">
+            <div class="zero-relevant-icon">🔍</div>
+            <div>
+                <h2 class="zero-relevant-title">No relevant articles found</h2>
+                <p class="zero-relevant-subtitle">
+                    {% if result.articles_fetched and result.articles_fetched > 0 %}
+                    <strong>{{ result.articles_fetched }}</strong> article{{ 's were' if result.articles_fetched != 1 else ' was' }} retrieved, but none met the strict relevance criteria for <em>"{{ topic }}"</em>.
+                    {% else %}
+                    No news articles matching <em>"{{ topic }}"</em> were found.
+                    {% endif %}
+                </p>
+            </div>
+        </div>
+        {% if result.articles_filtered_out and result.articles_filtered_out > 0 %}
+        <div class="zero-relevant-diagnostic">
+            ℹ️ Strict relevance filtering removed {{ result.articles_filtered_out }} low-relevance article{{ 's' if result.articles_filtered_out != 1 }}.
+        </div>
+        {% endif %}
+        <div class="zero-relevant-help">
+            <p>💡 Suggestions to get better results:</p>
+            <ul>
+                <li>Check for typos or spelling in your search query.</li>
+                <li>Try a broader topic (e.g. "AI regulations", "India economy").</li>
+                <li>Use general keywords instead of complex sentence claims.</li>
+            </ul>
+        </div>
+        <div class="zero-relevant-actions">
+            <a href="/" class="new-analysis-btn" id="retry-search-btn">↺ New Search</a>
+        </div>
+    </div>
+    {% elif error %}
+    <div class="error-box" id="error-message">
+        <span class="error-icon">⚠️</span>
+        <span class="error-text">{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <!-- ── Results ── -->
+    {% if result and result.status != 'error' %}
+    <div id="results-area">
+
+        <!-- Stats Bar -->
+        <div class="stats-bar" id="status-bar">
+            <div class="stat-card">
+                <div class="stat-value {% if result.status == 'success' %}status-success{% elif result.status == 'partial' %}status-partial{% else %}status-error{% endif %}">
+                    {{ result.status | upper }}
+                </div>
+                <div class="stat-label">Status</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ result.articles_fetched }}</div>
+                <div class="stat-label">Retrieved</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ result.articles_filtered_out if result.articles_filtered_out is not none else 0 }}</div>
+                <div class="stat-label">Filtered Out</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ result.articles_after_relevance_filter if result.articles_after_relevance_filter is not none else result.unique_articles }}</div>
+                <div class="stat-label">Relevant</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ result.duplicates_removed }}</div>
+                <div class="stat-label">Dupes Removed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ result.event_groups }}</div>
+                <div class="stat-label">Event Groups</div>
+            </div>
+        </div>
+
+        <!-- Relevance Flow Bar -->
+        <div class="relevance-flow-bar" id="relevance-flow-bar">
+            <div class="flow-step">
+                <span class="flow-num">{{ result.articles_fetched }}</span>
+                <span class="flow-label">Retrieved</span>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-step flow-filtered">
+                <span class="flow-num">{{ result.articles_filtered_out if result.articles_filtered_out is not none else 0 }}</span>
+                <span class="flow-label">Filtered Out</span>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-step flow-relevant">
+                <span class="flow-num">{{ result.articles_after_relevance_filter if result.articles_after_relevance_filter is not none else result.unique_articles }}</span>
+                <span class="flow-label">Relevant</span>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-step">
+                <span class="flow-num">{{ result.event_groups }}</span>
+                <span class="flow-label">Event Groups</span>
+            </div>
+        </div>
+
+        {% if result.articles_filtered_out and result.articles_filtered_out > 0 %}
+        <div class="relevance-notice" id="relevance-notice">
+            <span class="notice-icon">ℹ️</span>
+            <span>
+                Strict relevance filtering removed <strong>{{ result.articles_filtered_out }}</strong>
+                low-relevance article{{ 's' if result.articles_filtered_out != 1 }} before analysis.
+            </span>
+        </div>
+        {% endif %}
+
+        <!-- Analysis Cards -->
+        <div class="results-container" id="result-output">
+
+        {% for analysis in result.analyses %}
+        {% if analysis.status == 'success' and analysis.analysis %}
+        {% set a = analysis.analysis %}
+
+        <!-- Group Header Card -->
+        <div class="result-card" style="animation-delay: {{ loop.index0 * 0.08 }}s">
+            <div class="group-header">
+                <div class="group-number">{{ loop.index }}</div>
+                <div>
+                    <div class="group-title">{{ analysis.group_label }}</div>
+                    <div class="group-meta">Analyzed by {{ analysis.model_used }}</div>
+                </div>
+            </div>
+
+            <!-- Summary -->
+            <div class="card-header">
+                <span class="card-icon">📋</span>
+                <span class="card-title">Summary</span>
+            </div>
+            <div class="card-body">
+                <p class="summary-text">{{ a.summary }}</p>
+            </div>
+        </div>
+
+        <!-- Agreed Information -->
+        {% if a.agreed_information %}
+        <div class="result-card" style="animation-delay: {{ loop.index0 * 0.08 + 0.05 }}s">
+            <div class="card-header">
+                <span class="card-icon">✅</span>
+                <span class="card-title">Agreed Information</span>
+                <span class="card-count">{{ a.agreed_information | length }} item{{ 's' if a.agreed_information | length != 1 }}</span>
+            </div>
+            <div class="card-body">
+                <ul class="info-list">
+                {% for item in a.agreed_information %}
+                    <li class="info-item agreed">
+                        {% if item is string %}{{ item }}
+                        {% elif item is mapping %}{{ item.fact or item }}
+                        {% endif %}
+                    </li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Differing Information -->
+        {% if a.differing_information %}
+        <div class="result-card" style="animation-delay: {{ loop.index0 * 0.08 + 0.1 }}s">
+            <div class="card-header">
+                <span class="card-icon">🔄</span>
+                <span class="card-title">Differing Information</span>
+                <span class="card-count">{{ a.differing_information | length }} item{{ 's' if a.differing_information | length != 1 }}</span>
+            </div>
+            <div class="card-body">
+                <ul class="info-list">
+                {% for item in a.differing_information %}
+                    <li class="info-item differing">
+                        {% if item is string %}{{ item }}
+                        {% elif item is mapping %}{{ item }}
+                        {% endif %}
+                    </li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Potential Contradictions -->
+        {% if a.potential_contradictions %}
+        <div class="result-card" style="animation-delay: {{ loop.index0 * 0.08 + 0.15 }}s">
+            <div class="card-header">
+                <span class="card-icon">⚠️</span>
+                <span class="card-title">Potential Contradictions</span>
+                <span class="card-count">{{ a.potential_contradictions | length }} item{{ 's' if a.potential_contradictions | length != 1 }}</span>
+            </div>
+            <div class="card-body">
+                <div class="notice-bar">
+                    <span>ℹ️</span>
+                    <span>Contradictions are flagged for review. A difference between sources does not necessarily mean a source is incorrect.</span>
+                </div>
+                <ul class="info-list">
+                {% for item in a.potential_contradictions %}
+                    <li class="info-item contradiction">
+                        {% if item is string %}{{ item }}
+                        {% elif item is mapping %}{{ item }}
+                        {% endif %}
+                    </li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Unique Claims -->
+        {% if a.unique_claims %}
+        <div class="result-card" style="animation-delay: {{ loop.index0 * 0.08 + 0.2 }}s">
+            <div class="card-header">
+                <span class="card-icon">💡</span>
+                <span class="card-title">Unique Claims</span>
+                <span class="card-count">{{ a.unique_claims | length }} item{{ 's' if a.unique_claims | length != 1 }}</span>
+            </div>
+            <div class="card-body">
+                <ul class="info-list">
+                {% for item in a.unique_claims %}
+                    <li class="info-item unique">
+                        {% if item is mapping %}
+                            <span class="claim-text">{{ item.claim or item }}</span>
+                            {% if item.source %}
+                            <div class="source-label">Source: <span class="source-tag">{{ item.source }}</span></div>
+                            {% endif %}
+                        {% elif item is string %}{{ item }}
+                        {% endif %}
+                    </li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Source Assessment -->
+        {% if a.source_assessment %}
+        <div class="result-card" style="animation-delay: {{ loop.index0 * 0.08 + 0.25 }}s">
+            <div class="card-header">
+                <span class="card-icon">📰</span>
+                <span class="card-title">Source Assessment</span>
+                <span class="card-count">{{ a.source_assessment | length }} source{{ 's' if a.source_assessment | length != 1 }}</span>
+            </div>
+            <div class="card-body">
+                <ul class="info-list">
+                {% for item in a.source_assessment %}
+                    <li class="info-item assessment">
+                        {% if item is mapping %}
+                            <span class="source-tag">{{ item.source }}</span>
+                            <span class="claim-text">{{ item.assessment }}</span>
+                        {% elif item is string %}{{ item }}
+                        {% endif %}
+                    </li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Uncertainty Notes -->
+        {% if a.uncertainty_notes %}
+        <div class="result-card" style="animation-delay: {{ loop.index0 * 0.08 + 0.3 }}s">
+            <div class="card-header">
+                <span class="card-icon">❓</span>
+                <span class="card-title">Uncertainty Notes</span>
+                <span class="card-count">{{ a.uncertainty_notes | length }} note{{ 's' if a.uncertainty_notes | length != 1 }}</span>
+            </div>
+            <div class="card-body">
+                <ul class="info-list">
+                {% for item in a.uncertainty_notes %}
+                    <li class="info-item uncertainty">{{ item }}</li>
+                {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        {% elif analysis.status == 'error' %}
+        <div class="result-card">
+            <div class="group-header">
+                <div class="group-number">{{ loop.index }}</div>
+                <div>
+                    <div class="group-title">{{ analysis.group_label }}</div>
+                    <div class="group-meta" style="color: var(--red);">Analysis failed</div>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="error-box">
+                    <span class="error-icon">⚠️</span>
+                    <span class="error-text">{{ analysis.error }}</span>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        {% endfor %}
+
+        <!-- Sources Analyzed -->
+        {% if result.groups %}
+        {% for group in result.groups %}
+        <div class="result-card sources-card">
+            <div class="card-header">
+                <span class="card-icon">🌐</span>
+                <span class="card-title">Sources Analyzed</span>
+                <span class="card-count">{{ group.articles | length }} article{{ 's' if group.articles | length != 1 }}</span>
+            </div>
+            {% if group.label %}
+            <div class="card-body" style="padding-bottom: 4px;">
+                <p class="group-sources-label">Event Group: <strong>{{ group.label }}</strong></p>
+            </div>
+            {% endif %}
+            <div class="card-body source-list">
+            {% for article in group.articles %}
+                <div class="source-article-card">
+                    <div class="source-article-main">
+                        <h3 class="source-article-title">{{ article.title if article.title else 'Untitled Article' }}</h3>
+                        <div class="source-article-meta">
+                            <span class="source-pub-name">
+                                {% if article.source is mapping and article.source.name %}{{ article.source.name }}
+                                {% elif article.source is string %}{{ article.source }}
+                                {% else %}Unknown Source
+                                {% endif %}
+                            </span>
+                            {% if article.author %}
+                            <span class="source-meta-sep">·</span>
+                            <span class="source-author">{{ article.author }}</span>
+                            {% endif %}
+                            {% if article.publishedAt %}
+                            <span class="source-meta-sep">·</span>
+                            <span class="source-date">{{ article.publishedAt[:10] if article.publishedAt | length >= 10 else article.publishedAt }}</span>
+                            {% endif %}
+                        </div>
+                        {% if article.description %}
+                        <p class="source-article-desc">{{ article.description }}</p>
+                        {% endif %}
+                    </div>
+                    {% if article.url %}
+                    <div class="source-article-action">
+                        <a href="{{ article.url }}" target="_blank" rel="noopener noreferrer" class="read-article-btn">
+                            Read ↗
+                        </a>
+                    </div>
+                    {% endif %}
+                </div>
+            {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+
+        <!-- No analyses fallback -->
+        {% if not result.analyses and result.comparisons %}
+        <div class="result-card">
+            <div class="card-header">
+                <span class="card-icon">📊</span>
+                <span class="card-title">Comparison Data Available</span>
+            </div>
+            <div class="card-body">
+                <p class="summary-text" style="color: var(--text-muted);">
+                    AI analysis was not available for this request. Raw comparison data is available in the JSON output below.
+                </p>
+            </div>
+        </div>
+        {% endif %}
+
+        </div><!-- /results-container -->
+
+        <!-- Raw JSON Toggle -->
+        <div class="json-section">
+            <button class="json-toggle" id="json-toggle" type="button">
+                📄 View Raw JSON
+            </button>
+            <pre class="json-output" id="json-output">{{ result_json }}</pre>
+        </div>
+
+        <!-- New Analysis -->
+        <div class="new-analysis-section">
+            <a href="/" class="new-analysis-btn" id="new-analysis-btn">
+                ↺ New Analysis
+            </a>
+        </div>
+
+    </div><!-- /results-area -->
+    {% endif %}
+
+    <footer class="app-footer">
+        News Analyzer &mdash; AI-powered multi-source news comparison &nbsp;·&nbsp; Built with Gemini AI
+    </footer>
+
+</div><!-- /app-container -->
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
