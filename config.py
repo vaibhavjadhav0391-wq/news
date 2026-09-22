@@ -11,8 +11,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
 def validate_config():
@@ -26,9 +27,10 @@ def validate_config():
 
 def validate_gemini_config():
     """Check that AI API configuration is present."""
-    if not OPENROUTER_API_KEY and not GEMINI_API_KEY:
-        print("ERROR: Neither OpenRouter nor Gemini API key is configured.")
-        print("Please edit the .env file and add OPENROUTER_API_KEY or GEMINI_API_KEY.")
+    if not GROQ_API_KEY and not OPENROUTER_API_KEY and not GEMINI_API_KEY:
+        print("ERROR: No AI API key is configured (Groq, OpenRouter, or Gemini).")
+        print("Please edit the .env file and add GROQ_API_KEY.")
         sys.exit(1)
+
 
 

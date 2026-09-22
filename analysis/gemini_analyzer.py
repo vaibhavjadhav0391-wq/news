@@ -1,7 +1,7 @@
 """
 AI Analyzer - Multi-Source News Analysis
-Uses OpenRouter (or Google Gemini fallback) to generate neutral, evidence-based
-analysis from the structured multi-source comparison produced by Stage 4.
+Uses Groq (Ultra-fast 0.6s Llama/GPT models), with OpenRouter & Google Gemini fallbacks.
+Produces structured, neutral, evidence-based comparisons.
 
 HOW IT WORKS:
 =============
@@ -14,31 +14,32 @@ HOW IT WORKS:
    - Note claims from single sources
    - Preserve source attribution
    - Acknowledge uncertainty
-3. Parses JSON-formatted output for predictable, structured reporting.
+3. Executes multi-threaded parallel requests for near-instant responses.
 """
 
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
-from config import OPENROUTER_API_KEY, GEMINI_API_KEY
+from config import GROQ_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY
 
 # ──────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────
 
-# Top active free models on OpenRouter (100% free, reliable)
-DEFAULT_OPENROUTER_MODELS = [
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
+# Ultra-fast Groq models (0.5s - 1.2s response time)
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b"
 ]
 
-DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 
-# Max groups to analyze per search
-MAX_GROUPS_TO_ANALYZE = 5
-
+# Max groups to analyze per search (top 3-4 most prominent multi-source events)
+MAX_GROUPS_TO_ANALYZE = 4
 
 # Expected fields in the AI JSON response
 EXPECTED_FIELDS = [
@@ -59,12 +60,6 @@ EXPECTED_FIELDS = [
 def build_analysis_prompt(comparison_result):
     """
     Build a structured prompt from a comparison result.
-
-    Args:
-        comparison_result: Dict from comparator.compare_group().
-
-    Returns:
-        Prompt string for the AI API.
     """
     group_label = comparison_result.get("group_label", "Unknown event")
     sources = comparison_result.get("sources", [])
@@ -162,7 +157,7 @@ INSTRUCTIONS:
 8. Do NOT invent or assume any information not present in the data above.
 9. Distinguish between "reported" information and "verified" facts.
 
-Respond ONLY with a JSON object containing these exact fields:
+Respond with a JSON object containing these exact fields:
 {{
   "summary": "A neutral 2-4 sentence summary of the event.",
   "agreed_information": ["fact 1 supported by multiple sources", "fact 2..."],
@@ -173,20 +168,67 @@ Respond ONLY with a JSON object containing these exact fields:
   "uncertainty_notes": ["area of uncertainty 1", "area 2..."]
 }}
 
-Respond ONLY with valid JSON. No markdown code blocks around it, no commentary."""
+Respond ONLY with valid raw JSON."""
 
     return prompt
 
 
 # ──────────────────────────────────────────────────────────────
-# API Interaction (OpenRouter with Gemini Fallback)
+# API Engine: Groq (Primary) -> OpenRouter -> Gemini (Fallbacks)
 # ──────────────────────────────────────────────────────────────
 
-def call_openrouter(prompt, api_key=None, model=DEFAULT_MODEL):
+def call_groq(prompt, api_key=None, model=None):
     """
-    Call OpenRouter API using requests.
-    Attempts primary model and automatically falls back if needed.
+    Call Groq API (Blazing fast, 0.5-1.5s latency).
     """
+    key = api_key or GROQ_API_KEY
+    if not key:
+        raise ValueError("Groq API key is not configured.")
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
+
+    models_to_try = [model] if model in GROQ_MODELS else GROQ_MODELS
+
+    last_error = None
+    for target_model in models_to_try:
+        payload = {
+            "model": target_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional neutral news analyst. Always return valid JSON."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.2
+        }
+
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=12
+            )
+            if res.status_code == 200:
+                data = res.json()
+                content = data["choices"][0]["message"]["content"]
+                return content, f"groq/{target_model}"
+            else:
+                last_error = f"Status {res.status_code}: {res.text[:200]}"
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    raise RuntimeError(f"Groq API call failed: {last_error}")
+
+
+def call_openrouter(prompt, api_key=None):
+    """Call OpenRouter API as secondary fallback."""
     key = api_key or OPENROUTER_API_KEY
     if not key:
         raise ValueError("OpenRouter API key is not configured.")
@@ -198,51 +240,44 @@ def call_openrouter(prompt, api_key=None, model=DEFAULT_MODEL):
         "X-Title": "News Analyzer"
     }
 
-    models_to_try = [model] + [m for m in DEFAULT_OPENROUTER_MODELS if m != model]
+    models = [
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free"
+    ]
 
     last_error = None
-    for target_model in models_to_try:
+    for target_model in models:
         payload = {
             "model": target_model,
             "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a professional neutral news analyst. Always respond in valid raw JSON."
-                },
+                {"role": "system", "content": "You are a neutral news analyst. Always return valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             "temperature": 0.2
         }
-
         try:
-            res = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
+            res = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=12)
             if res.status_code == 200:
                 data = res.json()
-                content = data["choices"][0]["message"]["content"]
-                return content, target_model
-            else:
-                last_error = f"Status {res.status_code}: {res.text[:200]}"
+                if "choices" in data and data["choices"]:
+                    return data["choices"][0]["message"]["content"], target_model
+            last_error = res.text[:200]
         except Exception as e:
             last_error = str(e)
             continue
 
-    raise RuntimeError(f"OpenRouter API call failed on all models: {last_error}")
+    raise RuntimeError(f"OpenRouter failed: {last_error}")
 
 
 def create_gemini_client(api_key=None):
     """Fallback client for legacy Gemini API."""
     key = api_key or GEMINI_API_KEY
     if not key:
-        raise ValueError("Neither OpenRouter nor Gemini API key is configured.")
+        return None
     try:
         from google import genai
         return genai.Client(api_key=key)
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -265,19 +300,16 @@ def call_gemini(client, prompt, model="gemini-3.6-flash"):
 def parse_ai_response(text):
     """
     Parse the AI response string into a structured dict.
-    Extracts JSON even if wrapped in markdown blocks.
     """
     if not text or not text.strip():
         raise ValueError("AI returned an empty response.")
 
     cleaned = text.strip()
-    # If wrapped in ```json ... ```
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
         cleaned = cleaned.strip()
 
-    # Find first { and last }
     start_idx = cleaned.find("{")
     end_idx = cleaned.rfind("}")
     if start_idx != -1 and end_idx != -1:
@@ -286,9 +318,7 @@ def parse_ai_response(text):
     try:
         result = json.loads(cleaned)
     except json.JSONDecodeError as e:
-        raise ValueError(
-            f"AI response is not valid JSON: {e}. Raw: {text[:200]}"
-        ) from e
+        raise ValueError(f"AI response is not valid JSON: {e}. Raw: {text[:200]}") from e
 
     if not isinstance(result, dict):
         raise ValueError(f"AI response is not a JSON object. Got: {type(result).__name__}")
@@ -314,15 +344,12 @@ parse_gemini_response = parse_ai_response
 
 
 # ──────────────────────────────────────────────────────────────
-# Main Analysis Function
+# Main Analysis Functions
 # ──────────────────────────────────────────────────────────────
 
 def analyze_group(comparison_result, client=None, model=DEFAULT_MODEL):
     """
-    Analyze a single event group comparison using OpenRouter (or Gemini fallback).
-
-    Returns:
-        Dict with group_id, group_label, model_used, analysis, status, error.
+    Analyze a single event group comparison using the fastest available engine.
     """
     group_id = comparison_result.get("group_id", 0)
     group_label = comparison_result.get("group_label", "Unknown")
@@ -340,10 +367,10 @@ def analyze_group(comparison_result, client=None, model=DEFAULT_MODEL):
 
     prompt = build_analysis_prompt(comparison_result)
 
-    # 1. Primary: Try OpenRouter
-    if OPENROUTER_API_KEY:
+    # 1. Primary: Groq (Blazing fast 0.6s)
+    if GROQ_API_KEY:
         try:
-            raw_text, used_model = call_openrouter(prompt, api_key=OPENROUTER_API_KEY, model=model)
+            raw_text, used_model = call_groq(prompt, api_key=GROQ_API_KEY, model=model)
             analysis = parse_ai_response(raw_text)
             return {
                 "group_id": group_id,
@@ -353,11 +380,26 @@ def analyze_group(comparison_result, client=None, model=DEFAULT_MODEL):
                 "status": "success",
                 "error": None,
             }
-        except Exception as e:
-            # Fall through to Gemini if available
+        except Exception:
             pass
 
-    # 2. Fallback: Try Gemini
+    # 2. Secondary: OpenRouter
+    if OPENROUTER_API_KEY:
+        try:
+            raw_text, used_model = call_openrouter(prompt, api_key=OPENROUTER_API_KEY)
+            analysis = parse_ai_response(raw_text)
+            return {
+                "group_id": group_id,
+                "group_label": group_label,
+                "model_used": used_model,
+                "analysis": analysis,
+                "status": "success",
+                "error": None,
+            }
+        except Exception:
+            pass
+
+    # 3. Tertiary: Gemini
     if GEMINI_API_KEY:
         try:
             if client is None:
@@ -388,34 +430,50 @@ def analyze_group(comparison_result, client=None, model=DEFAULT_MODEL):
         "model_used": model,
         "analysis": None,
         "status": "error",
-        "error": "No valid OpenRouter or Gemini API key configured.",
+        "error": "No valid AI API key configured.",
     }
 
 
 def analyze_all_groups(comparison_results, client=None, model=DEFAULT_MODEL):
     """
-    Analyze all event group comparisons.
-    With OpenRouter, fast analysis is performed without 13-second delays!
+    Analyze all event group comparisons in parallel for instant speed.
     """
-    groups_to_analyze = comparison_results[:MAX_GROUPS_TO_ANALYZE]
-    results = []
-    for comparison in groups_to_analyze:
-        result = analyze_group(comparison, client=client, model=model)
-        results.append(result)
-        # Small 0.5s pause to prevent local network flood
-        time.sleep(0.5)
+    sorted_groups = sorted(
+        comparison_results,
+        key=lambda g: g.get("article_count", len(g.get("sources", []))),
+        reverse=True
+    )
+    groups_to_analyze = sorted_groups[:MAX_GROUPS_TO_ANALYZE]
 
-    return results
+    if not groups_to_analyze:
+        return []
 
+    results_dict = {}
+    with ThreadPoolExecutor(max_workers=min(len(groups_to_analyze), 4)) as executor:
+        future_to_idx = {
+            executor.submit(analyze_group, comp, client, model): i
+            for i, comp in enumerate(groups_to_analyze)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results_dict[idx] = future.result()
+            except Exception as e:
+                comp = groups_to_analyze[idx]
+                results_dict[idx] = {
+                    "group_id": comp.get("group_id", idx + 1),
+                    "group_label": comp.get("group_label", "Unknown"),
+                    "model_used": model,
+                    "analysis": None,
+                    "status": "error",
+                    "error": str(e),
+                }
 
-# ──────────────────────────────────────────────────────────────
-# Report Printing
-# ──────────────────────────────────────────────────────────────
+    return [results_dict[i] for i in range(len(groups_to_analyze))]
+
 
 def print_analysis_report(result):
-    """
-    Print a human-readable AI analysis report.
-    """
+    """Print formatted analysis report."""
     print(f"\n{'=' * 70}")
     print(f"  AI ANALYSIS: \"{result['group_label']}\"")
     print(f"{'=' * 70}")
@@ -424,58 +482,9 @@ def print_analysis_report(result):
     print(f"  Status:    {result['status']}")
 
     if result["status"] == "error":
-        print(f"  Error:     {result['error']}")
-        print()
+        print(f"  Error:     {result['error']}\n")
         return
 
     analysis = result["analysis"]
-    print(f"\n  --- SUMMARY ---")
-    print(f"  {analysis.get('summary', 'N/A')}")
-
-    agreed = analysis.get("agreed_information", [])
-    print(f"\n  --- AGREED INFORMATION ({len(agreed)} items) ---")
-    for item in agreed:
-        if isinstance(item, str):
-            print(f"    - {item}")
-        elif isinstance(item, dict):
-            print(f"    - {item.get('fact', item)}")
-
-    differing = analysis.get("differing_information", [])
-    print(f"\n  --- DIFFERING INFORMATION ({len(differing)} items) ---")
-    for item in differing:
-        if isinstance(item, str):
-            print(f"    - {item}")
-        elif isinstance(item, dict):
-            print(f"    - {item}")
-
-    contradictions = analysis.get("potential_contradictions", [])
-    print(f"\n  --- POTENTIAL CONTRADICTIONS ({len(contradictions)} items) ---")
-    for item in contradictions:
-        if isinstance(item, str):
-            print(f"    - {item}")
-        elif isinstance(item, dict):
-            print(f"    - {item}")
-
-    unique = analysis.get("unique_claims", [])
-    print(f"\n  --- UNIQUE CLAIMS ({len(unique)} items) ---")
-    for item in unique:
-        if isinstance(item, dict):
-            print(f"    - \"{item.get('claim', 'N/A')}\" (source: {item.get('source', 'N/A')})")
-        elif isinstance(item, str):
-            print(f"    - {item}")
-
-    assessment = analysis.get("source_assessment", [])
-    print(f"\n  --- SOURCE ASSESSMENT ({len(assessment)} items) ---")
-    for item in assessment:
-        if isinstance(item, dict):
-            print(f"    - {item.get('source', 'N/A')}: {item.get('assessment', 'N/A')}")
-        elif isinstance(item, str):
-            print(f"    - {item}")
-
-    uncertainty = analysis.get("uncertainty_notes", [])
-    print(f"\n  --- UNCERTAINTY NOTES ({len(uncertainty)} items) ---")
-    for item in uncertainty:
-        if isinstance(item, str):
-            print(f"    - {item}")
-
+    print(f"\n  --- SUMMARY ---\n  {analysis.get('summary', 'N/A')}")
     print()
