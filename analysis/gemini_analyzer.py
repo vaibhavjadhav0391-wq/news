@@ -29,6 +29,7 @@ IMPORTANT DESIGN PRINCIPLES:
 """
 
 import json
+import time
 
 from google import genai
 from google.genai import types as genai_types
@@ -41,6 +42,12 @@ from config import GEMINI_API_KEY
 
 # Gemini model to use. gemini-3.6-flash is fast and cost-effective.
 DEFAULT_MODEL = "gemini-3.6-flash"
+
+# Free tier: 5 requests per minute. We wait 15s between calls to stay safe.
+_RATE_LIMIT_DELAY_SECONDS = 15
+
+# Max groups to analyze with Gemini. Prevents rate-limit errors on broad topics.
+MAX_GROUPS_TO_ANALYZE = 5
 
 # Expected fields in the Gemini JSON response.
 EXPECTED_FIELDS = [
@@ -204,14 +211,16 @@ def create_gemini_client(api_key=None):
     return genai.Client(api_key=key)
 
 
-def call_gemini(client, prompt, model=DEFAULT_MODEL):
+def call_gemini(client, prompt, model=DEFAULT_MODEL, _retry=True):
     """
     Send a prompt to Gemini and return the raw response.
+    Automatically retries once after a wait if rate-limited (429).
 
     Args:
         client: genai.Client instance.
         prompt: The prompt string.
-        model: Gemini model name (default: gemini-2.0-flash).
+        model: Gemini model name (default: gemini-3.6-flash).
+        _retry: Internal flag — retries once on rate limit.
 
     Returns:
         The Gemini response object.
@@ -237,7 +246,11 @@ def call_gemini(client, prompt, model=DEFAULT_MODEL):
             error_msg = error_msg.replace(GEMINI_API_KEY, "[REDACTED]")
         if "API_KEY_INVALID" in error_msg or "401" in error_msg:
             raise RuntimeError(f"Invalid Gemini API key: {error_msg}") from e
-        if "429" in error_msg or "RATE_LIMIT" in error_msg.upper():
+        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg.upper():
+            if _retry:
+                # Wait 60 seconds and retry once
+                time.sleep(60)
+                return call_gemini(client, prompt, model, _retry=False)
             raise RuntimeError(f"Gemini rate limit exceeded: {error_msg}") from e
         raise RuntimeError(f"Gemini API error: {error_msg}") from e
     except genai.errors.ServerError as e:
@@ -424,10 +437,18 @@ def analyze_all_groups(comparison_results, client=None, model=DEFAULT_MODEL):
                 "error": str(e),
             }]
 
+    # Cap to MAX_GROUPS_TO_ANALYZE to avoid burning through free-tier quota
+    # on broad topics (e.g. "cricket" returns 11+ groups)
+    groups_to_analyze = comparison_results[:MAX_GROUPS_TO_ANALYZE]
+
     results = []
-    for comparison in comparison_results:
+    for i, comparison in enumerate(groups_to_analyze):
         result = analyze_group(comparison, client=client, model=model)
         results.append(result)
+        # Throttle: wait between calls to respect free-tier rate limit (5 RPM)
+        # Skip delay after the last group
+        if i < len(groups_to_analyze) - 1:
+            time.sleep(_RATE_LIMIT_DELAY_SECONDS)
 
     return results
 
