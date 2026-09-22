@@ -40,14 +40,15 @@ from config import GEMINI_API_KEY
 # Configuration
 # ──────────────────────────────────────────────────────────────
 
-# Gemini model to use. gemini-3.6-flash is fast and cost-effective.
-DEFAULT_MODEL = "gemini-3.6-flash"
+# Gemini model to use.
+# gemini-2.0-flash: 15 RPM free tier (vs 5 RPM for gemini-3.6-flash)
+DEFAULT_MODEL = "gemini-2.0-flash"
 
-# Free tier: 5 requests per minute. We wait 15s between calls to stay safe.
-_RATE_LIMIT_DELAY_SECONDS = 15
+# gemini-2.0-flash free tier: 15 RPM → safe to call every 5 seconds
+_RATE_LIMIT_DELAY_SECONDS = 5
 
-# Max groups to analyze with Gemini. Prevents rate-limit errors on broad topics.
-MAX_GROUPS_TO_ANALYZE = 5
+# Max groups to analyze. Increased since gemini-2.0-flash has higher quota.
+MAX_GROUPS_TO_ANALYZE = 10
 
 # Expected fields in the Gemini JSON response.
 EXPECTED_FIELDS = [
