@@ -1,56 +1,46 @@
 """
-Gemini AI Analyzer - Stage 5
-Uses Google Gemini to generate neutral, evidence-based analysis from
-the structured multi-source comparison produced by Stage 4.
+AI Analyzer - Multi-Source News Analysis
+Uses OpenRouter (or Google Gemini fallback) to generate neutral, evidence-based
+analysis from the structured multi-source comparison produced by Stage 4.
 
 HOW IT WORKS:
 =============
-
 1. Takes the comparison result from comparator.py (agreed facts, differences,
    contradictions, unique claims, named entities).
-
-2. Formats this into a structured prompt that instructs Gemini to:
+2. Formats this into a structured prompt instructing the AI to:
    - Summarize the event neutrally
    - Identify information supported by multiple sources
    - Highlight differences and contradictions
    - Note claims from single sources
    - Preserve source attribution
    - Acknowledge uncertainty
-
-3. Requests JSON-formatted output from Gemini for predictable parsing.
-
-4. Returns a structured analysis dict that downstream code can use.
-
-IMPORTANT DESIGN PRINCIPLES:
-   - Never declares a source "fake" just because it differs
-   - Distinguishes reported information from verified facts
-   - Acknowledges uncertainty when evidence is insufficient
-   - Does not invent information beyond what the articles provide
+3. Parses JSON-formatted output for predictable, structured reporting.
 """
 
 import json
+import re
 import time
+import requests
 
-from google import genai
-from google.genai import types as genai_types
-
-from config import GEMINI_API_KEY
+from config import OPENROUTER_API_KEY, GEMINI_API_KEY
 
 # ──────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────
 
-# gemini-3.6-flash is the current recommended model (gemini-2.0-flash discontinued).
-# Free tier limit: 5 requests per minute → wait 13s between calls to stay safe.
-DEFAULT_MODEL = "gemini-3.6-flash"
+# Top active free models on OpenRouter (100% free, reliable)
+DEFAULT_OPENROUTER_MODELS = [
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+]
 
-# 5 RPM → 1 request per 12s minimum. Using 13s for safety margin.
-_RATE_LIMIT_DELAY_SECONDS = 13
+DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
-# Max groups to analyze per search. 4 groups × 13s = ~52s total, stays under quota.
-MAX_GROUPS_TO_ANALYZE = 4
+# Max groups to analyze per search
+MAX_GROUPS_TO_ANALYZE = 5
 
-# Expected fields in the Gemini JSON response.
+
+# Expected fields in the AI JSON response
 EXPECTED_FIELDS = [
     "summary",
     "agreed_information",
@@ -68,13 +58,13 @@ EXPECTED_FIELDS = [
 
 def build_analysis_prompt(comparison_result):
     """
-    Build a structured prompt for Gemini from a comparison result.
+    Build a structured prompt from a comparison result.
 
     Args:
         comparison_result: Dict from comparator.compare_group().
 
     Returns:
-        Prompt string for the Gemini API.
+        Prompt string for the AI API.
     """
     group_label = comparison_result.get("group_label", "Unknown event")
     sources = comparison_result.get("sources", [])
@@ -100,9 +90,9 @@ def build_analysis_prompt(comparison_result):
         for item in differing:
             versions = "; ".join(
                 f"{v['source']}: {v['value']} (\"{v['context']}\")"
-                for v in item["versions"]
+                for v in item.get("versions", [])
             )
-            items.append(f"  - Topic: {item['topic']} | {versions}")
+            items.append(f"  - Topic: {item.get('topic', 'General')} | {versions}")
         differing_text = "\n".join(items)
     else:
         differing_text = "  (none detected)"
@@ -114,9 +104,9 @@ def build_analysis_prompt(comparison_result):
         items = []
         for item in contradictions:
             claims = "; ".join(
-                f"{c['source']}: {c['claim']}" for c in item["claims"]
+                f"{c['source']}: {c['claim']}" for c in item.get("claims", [])
             )
-            items.append(f"  - {item['topic']} | {claims}")
+            items.append(f"  - {item.get('topic', 'Topic')} | {claims}")
         contradictions_text = "\n".join(items)
     else:
         contradictions_text = "  (none detected)"
@@ -172,136 +162,137 @@ INSTRUCTIONS:
 8. Do NOT invent or assume any information not present in the data above.
 9. Distinguish between "reported" information and "verified" facts.
 
-Respond with a JSON object containing these exact fields:
-- "summary": A neutral 2-4 sentence summary of the event.
-- "agreed_information": A list of strings describing facts supported by multiple sources.
-- "differing_information": A list of strings describing where sources disagree, with source names.
-- "potential_contradictions": A list of strings describing potential contradictions, or an empty list if none.
-- "unique_claims": A list of objects with "claim" and "source" fields for single-source information.
-- "source_assessment": A list of objects with "source" and "assessment" fields briefly describing each source's contribution.
-- "uncertainty_notes": A list of strings noting areas where more information is needed.
+Respond ONLY with a JSON object containing these exact fields:
+{{
+  "summary": "A neutral 2-4 sentence summary of the event.",
+  "agreed_information": ["fact 1 supported by multiple sources", "fact 2..."],
+  "differing_information": ["differing point 1 with source names", "differing point 2..."],
+  "potential_contradictions": ["potential contradiction 1", "or empty list"],
+  "unique_claims": [{{"claim": "single-source fact", "source": "Source Name"}}],
+  "source_assessment": [{{"source": "Source Name", "assessment": "brief neutral evaluation"}}],
+  "uncertainty_notes": ["area of uncertainty 1", "area 2..."]
+}}
 
-Respond ONLY with a valid JSON object. No explanation outside the JSON."""
+Respond ONLY with valid JSON. No markdown code blocks around it, no commentary."""
 
     return prompt
 
 
 # ──────────────────────────────────────────────────────────────
-# Gemini API Interaction
+# API Interaction (OpenRouter with Gemini Fallback)
 # ──────────────────────────────────────────────────────────────
 
+def call_openrouter(prompt, api_key=None, model=DEFAULT_MODEL):
+    """
+    Call OpenRouter API using requests.
+    Attempts primary model and automatically falls back if needed.
+    """
+    key = api_key or OPENROUTER_API_KEY
+    if not key:
+        raise ValueError("OpenRouter API key is not configured.")
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/vaibhavjadhav0391-wq/news",
+        "X-Title": "News Analyzer"
+    }
+
+    models_to_try = [model] + [m for m in DEFAULT_OPENROUTER_MODELS if m != model]
+
+    last_error = None
+    for target_model in models_to_try:
+        payload = {
+            "model": target_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional neutral news analyst. Always respond in valid raw JSON."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2
+        }
+
+        try:
+            res = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            if res.status_code == 200:
+                data = res.json()
+                content = data["choices"][0]["message"]["content"]
+                return content, target_model
+            else:
+                last_error = f"Status {res.status_code}: {res.text[:200]}"
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    raise RuntimeError(f"OpenRouter API call failed on all models: {last_error}")
+
+
 def create_gemini_client(api_key=None):
-    """
-    Create a Gemini API client.
-
-    Args:
-        api_key: Optional API key. Defaults to GEMINI_API_KEY from config.
-
-    Returns:
-        genai.Client instance.
-
-    Raises:
-        ValueError: If no API key is available.
-    """
+    """Fallback client for legacy Gemini API."""
     key = api_key or GEMINI_API_KEY
     if not key:
-        raise ValueError(
-            "Gemini API key is not configured. "
-            "Please set GEMINI_API_KEY in your .env file."
-        )
-    return genai.Client(api_key=key)
-
-
-def call_gemini(client, prompt, model=DEFAULT_MODEL, _retry=True):
-    """
-    Send a prompt to Gemini and return the raw response.
-    Automatically retries once after a wait if rate-limited (429).
-
-    Args:
-        client: genai.Client instance.
-        prompt: The prompt string.
-        model: Gemini model name (default: gemini-3.6-flash).
-        _retry: Internal flag — retries once on rate limit.
-
-    Returns:
-        The Gemini response object.
-
-    Raises:
-        ConnectionError: On network errors.
-        RuntimeError: On API errors (invalid key, rate limit, etc.).
-    """
+        raise ValueError("Neither OpenRouter nor Gemini API key is configured.")
     try:
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.2,  # Low temperature for factual analysis
-            ),
-        )
-        return response
-    except genai.errors.ClientError as e:
-        error_msg = str(e)
-        # Redact API key from error messages
-        if GEMINI_API_KEY and GEMINI_API_KEY in error_msg:
-            error_msg = error_msg.replace(GEMINI_API_KEY, "[REDACTED]")
-        if "API_KEY_INVALID" in error_msg or "401" in error_msg:
-            raise RuntimeError(f"Invalid Gemini API key: {error_msg}") from e
-        if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg.upper():
-            if _retry:
-                # Wait 60 seconds and retry once
-                time.sleep(60)
-                return call_gemini(client, prompt, model, _retry=False)
-            raise RuntimeError(f"Gemini rate limit exceeded: {error_msg}") from e
-        raise RuntimeError(f"Gemini API error: {error_msg}") from e
-    except genai.errors.ServerError as e:
-        error_msg = str(e)
-        if GEMINI_API_KEY and GEMINI_API_KEY in error_msg:
-            error_msg = error_msg.replace(GEMINI_API_KEY, "[REDACTED]")
-        raise RuntimeError(f"Gemini server error: {error_msg}") from e
+        from google import genai
+        return genai.Client(api_key=key)
     except Exception as e:
-        error_msg = str(e)
-        if GEMINI_API_KEY and GEMINI_API_KEY in error_msg:
-            error_msg = error_msg.replace(GEMINI_API_KEY, "[REDACTED]")
-        raise ConnectionError(f"Network or connection error: {error_msg}") from e
+        return None
 
 
-def parse_gemini_response(response):
+def call_gemini(client, prompt, model="gemini-3.6-flash"):
+    """Fallback Gemini API call."""
+    if client is None:
+        raise ValueError("Gemini client is not initialized.")
+    from google.genai import types as genai_types
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.2,
+        ),
+    )
+    return response.text
+
+
+def parse_ai_response(text):
     """
-    Parse the Gemini response into a structured dict.
-
-    Args:
-        response: The Gemini response object.
-
-    Returns:
-        Parsed dict with the expected analysis fields.
-
-    Raises:
-        ValueError: If the response cannot be parsed as valid JSON.
+    Parse the AI response string into a structured dict.
+    Extracts JSON even if wrapped in markdown blocks.
     """
-    try:
-        text = response.text
-    except (AttributeError, TypeError):
-        raise ValueError("Gemini returned an empty or invalid response.")
-
     if not text or not text.strip():
-        raise ValueError("Gemini returned an empty response.")
+        raise ValueError("AI returned an empty response.")
 
-    # Attempt to parse as JSON
+    cleaned = text.strip()
+    # If wrapped in ```json ... ```
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        cleaned = cleaned.strip()
+
+    # Find first { and last }
+    start_idx = cleaned.find("{")
+    end_idx = cleaned.rfind("}")
+    if start_idx != -1 and end_idx != -1:
+        cleaned = cleaned[start_idx : end_idx + 1]
+
     try:
-        result = json.loads(text)
+        result = json.loads(cleaned)
     except json.JSONDecodeError as e:
         raise ValueError(
-            f"Gemini response is not valid JSON: {e}. "
-            f"Response starts with: {text[:200]}"
+            f"AI response is not valid JSON: {e}. Raw: {text[:200]}"
         ) from e
 
     if not isinstance(result, dict):
-        raise ValueError(
-            f"Gemini response is not a JSON object. Got: {type(result).__name__}"
-        )
+        raise ValueError(f"AI response is not a JSON object. Got: {type(result).__name__}")
 
-    # Ensure all expected fields exist with defaults
     defaults = {
         "summary": "No summary available.",
         "agreed_information": [],
@@ -319,37 +310,24 @@ def parse_gemini_response(response):
     return result
 
 
+parse_gemini_response = parse_ai_response
+
+
 # ──────────────────────────────────────────────────────────────
 # Main Analysis Function
 # ──────────────────────────────────────────────────────────────
 
 def analyze_group(comparison_result, client=None, model=DEFAULT_MODEL):
     """
-    Analyze a single event group comparison using Gemini.
-
-    Args:
-        comparison_result: Dict from comparator.compare_group().
-        client: Optional pre-created genai.Client. Created automatically if None.
-        model: Gemini model name (default: gemini-2.0-flash).
+    Analyze a single event group comparison using OpenRouter (or Gemini fallback).
 
     Returns:
-        Dict with:
-            "group_id": int
-            "group_label": str
-            "model_used": str
-            "analysis": the parsed Gemini analysis dict
-            "status": "success" or "error"
-            "error": error message if status is "error", else None
-
-    Raises:
-        Nothing — errors are caught and returned in the result dict.
+        Dict with group_id, group_label, model_used, analysis, status, error.
     """
     group_id = comparison_result.get("group_id", 0)
     group_label = comparison_result.get("group_label", "Unknown")
 
-    # Handle empty input
     if not comparison_result.get("articles", comparison_result.get("article_count", 0)):
-        # Check article_count since articles list may not be in comparison result
         if comparison_result.get("article_count", 0) == 0:
             return {
                 "group_id": group_id,
@@ -360,96 +338,72 @@ def analyze_group(comparison_result, client=None, model=DEFAULT_MODEL):
                 "error": "No articles in comparison result to analyze.",
             }
 
-    # Build prompt
     prompt = build_analysis_prompt(comparison_result)
 
-    # Create client if not provided
-    try:
-        if client is None:
-            client = create_gemini_client()
-    except ValueError as e:
-        return {
-            "group_id": group_id,
-            "group_label": group_label,
-            "model_used": model,
-            "analysis": None,
-            "status": "error",
-            "error": str(e),
-        }
+    # 1. Primary: Try OpenRouter
+    if OPENROUTER_API_KEY:
+        try:
+            raw_text, used_model = call_openrouter(prompt, api_key=OPENROUTER_API_KEY, model=model)
+            analysis = parse_ai_response(raw_text)
+            return {
+                "group_id": group_id,
+                "group_label": group_label,
+                "model_used": used_model,
+                "analysis": analysis,
+                "status": "success",
+                "error": None,
+            }
+        except Exception as e:
+            # Fall through to Gemini if available
+            pass
 
-    # Call Gemini
-    try:
-        response = call_gemini(client, prompt, model)
-    except (RuntimeError, ConnectionError) as e:
-        return {
-            "group_id": group_id,
-            "group_label": group_label,
-            "model_used": model,
-            "analysis": None,
-            "status": "error",
-            "error": str(e),
-        }
-
-    # Parse response
-    try:
-        analysis = parse_gemini_response(response)
-    except ValueError as e:
-        return {
-            "group_id": group_id,
-            "group_label": group_label,
-            "model_used": model,
-            "analysis": None,
-            "status": "error",
-            "error": str(e),
-        }
+    # 2. Fallback: Try Gemini
+    if GEMINI_API_KEY:
+        try:
+            if client is None:
+                client = create_gemini_client()
+            raw_text = call_gemini(client, prompt)
+            analysis = parse_ai_response(raw_text)
+            return {
+                "group_id": group_id,
+                "group_label": group_label,
+                "model_used": "gemini-3.6-flash",
+                "analysis": analysis,
+                "status": "success",
+                "error": None,
+            }
+        except Exception as e:
+            return {
+                "group_id": group_id,
+                "group_label": group_label,
+                "model_used": model,
+                "analysis": None,
+                "status": "error",
+                "error": str(e),
+            }
 
     return {
         "group_id": group_id,
         "group_label": group_label,
         "model_used": model,
-        "analysis": analysis,
-        "status": "success",
-        "error": None,
+        "analysis": None,
+        "status": "error",
+        "error": "No valid OpenRouter or Gemini API key configured.",
     }
 
 
 def analyze_all_groups(comparison_results, client=None, model=DEFAULT_MODEL):
     """
-    Analyze all event group comparisons using Gemini.
-
-    Args:
-        comparison_results: List of dicts from comparator.compare_all_groups().
-        client: Optional pre-created genai.Client.
-        model: Gemini model name.
-
-    Returns:
-        List of analysis result dicts (one per group).
+    Analyze all event group comparisons.
+    With OpenRouter, fast analysis is performed without 13-second delays!
     """
-    if client is None:
-        try:
-            client = create_gemini_client()
-        except ValueError as e:
-            return [{
-                "group_id": 0,
-                "group_label": "N/A",
-                "model_used": model,
-                "analysis": None,
-                "status": "error",
-                "error": str(e),
-            }]
-
-    # Cap to MAX_GROUPS_TO_ANALYZE to avoid burning through free-tier quota
-    # on broad topics (e.g. "cricket" returns 11+ groups)
     groups_to_analyze = comparison_results[:MAX_GROUPS_TO_ANALYZE]
-
     results = []
-    for i, comparison in enumerate(groups_to_analyze):
+    for comparison in groups_to_analyze:
         result = analyze_group(comparison, client=client, model=model)
         results.append(result)
-        # Throttle: wait between calls to respect free-tier rate limit (5 RPM)
-        # Skip delay after the last group
-        if i < len(groups_to_analyze) - 1:
-            time.sleep(_RATE_LIMIT_DELAY_SECONDS)
+        # Small 0.5s pause to prevent local network flood
+        time.sleep(0.5)
 
     return results
 
@@ -461,9 +415,6 @@ def analyze_all_groups(comparison_results, client=None, model=DEFAULT_MODEL):
 def print_analysis_report(result):
     """
     Print a human-readable AI analysis report.
-
-    Args:
-        result: Dict returned by analyze_group().
     """
     print(f"\n{'=' * 70}")
     print(f"  AI ANALYSIS: \"{result['group_label']}\"")
@@ -478,12 +429,9 @@ def print_analysis_report(result):
         return
 
     analysis = result["analysis"]
-
-    # Summary
     print(f"\n  --- SUMMARY ---")
     print(f"  {analysis.get('summary', 'N/A')}")
 
-    # Agreed information
     agreed = analysis.get("agreed_information", [])
     print(f"\n  --- AGREED INFORMATION ({len(agreed)} items) ---")
     for item in agreed:
@@ -492,7 +440,6 @@ def print_analysis_report(result):
         elif isinstance(item, dict):
             print(f"    - {item.get('fact', item)}")
 
-    # Differing information
     differing = analysis.get("differing_information", [])
     print(f"\n  --- DIFFERING INFORMATION ({len(differing)} items) ---")
     for item in differing:
@@ -501,7 +448,6 @@ def print_analysis_report(result):
         elif isinstance(item, dict):
             print(f"    - {item}")
 
-    # Contradictions
     contradictions = analysis.get("potential_contradictions", [])
     print(f"\n  --- POTENTIAL CONTRADICTIONS ({len(contradictions)} items) ---")
     for item in contradictions:
@@ -510,7 +456,6 @@ def print_analysis_report(result):
         elif isinstance(item, dict):
             print(f"    - {item}")
 
-    # Unique claims
     unique = analysis.get("unique_claims", [])
     print(f"\n  --- UNIQUE CLAIMS ({len(unique)} items) ---")
     for item in unique:
@@ -519,7 +464,6 @@ def print_analysis_report(result):
         elif isinstance(item, str):
             print(f"    - {item}")
 
-    # Source assessment
     assessment = analysis.get("source_assessment", [])
     print(f"\n  --- SOURCE ASSESSMENT ({len(assessment)} items) ---")
     for item in assessment:
@@ -528,7 +472,6 @@ def print_analysis_report(result):
         elif isinstance(item, str):
             print(f"    - {item}")
 
-    # Uncertainty notes
     uncertainty = analysis.get("uncertainty_notes", [])
     print(f"\n  --- UNCERTAINTY NOTES ({len(uncertainty)} items) ---")
     for item in uncertainty:
