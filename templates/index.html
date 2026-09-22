@@ -270,28 +270,38 @@
 
         <!-- Unique Claims -->
         {% if a.unique_claims %}
+        {% set ns = namespace(has_claims=false) %}
+        {% for item in a.unique_claims %}
+            {% if (item is mapping and item.claim and item.claim|length > 10) or (item is string and item|length > 10) %}
+                {% set ns.has_claims = true %}
+            {% endif %}
+        {% endfor %}
+
+        {% if ns.has_claims %}
         <div class="result-card" style="animation-delay: {{ loop.index0 * 0.08 + 0.2 }}s">
             <div class="card-header">
                 <span class="card-icon">💡</span>
                 <span class="card-title">Unique Claims</span>
-                <span class="card-count">{{ a.unique_claims | length }} item{{ 's' if a.unique_claims | length != 1 }}</span>
             </div>
             <div class="card-body">
                 <ul class="info-list">
                 {% for item in a.unique_claims %}
+                    {% if (item is mapping and item.claim and item.claim|length > 10) or (item is string and item|length > 10) %}
                     <li class="info-item unique">
                         {% if item is mapping %}
-                            <span class="claim-text">{{ item.claim or item }}</span>
+                            <span class="claim-text">{{ item.claim }}</span>
                             {% if item.source %}
                             <div class="source-label">Source: <span class="source-tag">{{ item.source }}</span></div>
                             {% endif %}
                         {% elif item is string %}{{ item }}
                         {% endif %}
                     </li>
+                    {% endif %}
                 {% endfor %}
                 </ul>
             </div>
         </div>
+        {% endif %}
         {% endif %}
 
         <!-- Source Assessment -->
@@ -342,17 +352,12 @@
                 <div class="group-number">{{ loop.index }}</div>
                 <div>
                     <div class="group-title">{{ analysis.group_label }}</div>
-                    <div class="group-meta" style="color: var(--red);">Analysis failed</div>
-                </div>
-            </div>
-            <div class="card-body">
-                <div class="error-box">
-                    <span class="error-icon">⚠️</span>
-                    <span class="error-text">{{ analysis.error }}</span>
+                    <div class="group-meta" style="color: var(--text-muted);">Source summary below</div>
                 </div>
             </div>
         </div>
         {% endif %}
+
         {% endfor %}
 
         <!-- Sources Analyzed -->
